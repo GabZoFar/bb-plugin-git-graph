@@ -1,0 +1,429 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  definePluginApp,
+  useBbNavigate,
+  useRpc,
+  type PluginThreadHeaderActionProps,
+  type PluginThreadPanelProps,
+} from "@bb/plugin-sdk/app";
+import type { GitGraphCommit, GitGraphResult, rpcContract } from "./server";
+import { Button } from "@/components/ui/button";
+import { Icon } from "@/components/ui/icon";
+
+type GraphLane = {
+  hash: string;
+  color: number;
+};
+
+type GraphRow = GitGraphCommit & {
+  before: GraphLane[];
+  after: GraphLane[];
+  lane: number;
+  color: number;
+};
+
+const LANE_STYLES = [
+  { stroke: "stroke-blue-500", fill: "fill-blue-500" },
+  { stroke: "stroke-orange-500", fill: "fill-orange-500" },
+  { stroke: "stroke-amber-400", fill: "fill-amber-400" },
+  { stroke: "stroke-pink-500", fill: "fill-pink-500" },
+  { stroke: "stroke-emerald-500", fill: "fill-emerald-500" },
+  { stroke: "stroke-violet-500", fill: "fill-violet-500" },
+  { stroke: "stroke-cyan-500", fill: "fill-cyan-500" },
+  { stroke: "stroke-red-500", fill: "fill-red-500" },
+];
+const LANE_GAP = 14;
+const GRAPH_PADDING = 13;
+const GRAPH_TRAILING_SPACE = 18;
+const ROW_HEIGHT = 52;
+const PAGE_SIZE = 50;
+const MAX_COMMITS = 200;
+const LOAD_MORE_THRESHOLD = 240;
+
+function buildRows(commits: GitGraphCommit[]): GraphRow[] {
+  let lanes: GraphLane[] = [];
+  let nextColor = 0;
+
+  const allocateColor = () => {
+    const color = nextColor;
+    nextColor = (nextColor + 1) % LANE_STYLES.length;
+    return color;
+  };
+
+  return commits.map((commit) => {
+    let lane = lanes.findIndex((item) => item.hash === commit.hash);
+    if (lane === -1) {
+      lane = 0;
+      lanes = [{ hash: commit.hash, color: allocateColor() }, ...lanes];
+    }
+
+    const currentLane = lanes[lane];
+    const before = [...lanes];
+    const after = lanes.filter((item) => item.hash !== commit.hash);
+    let insertionIndex = Math.min(lane, after.length);
+
+    commit.parents.forEach((parent, parentIndex) => {
+      if (after.some((item) => item.hash === parent)) return;
+      after.splice(insertionIndex, 0, {
+        hash: parent,
+        color: parentIndex === 0 ? currentLane.color : allocateColor(),
+      });
+      insertionIndex += 1;
+    });
+
+    lanes = after;
+    return { ...commit, before, after, lane, color: currentLane.color };
+  });
+}
+
+function laneX(lane: number): number {
+  return GRAPH_PADDING + lane * LANE_GAP;
+}
+
+function laneStyle(color: number) {
+  return LANE_STYLES[color % LANE_STYLES.length];
+}
+
+function GraphCell({ row, isFirst }: { row: GraphRow; isFirst: boolean }) {
+  const centerY = ROW_HEIGHT / 2;
+  const laneCount = Math.max(row.before.length, row.after.length, 1);
+  const width = laneX(laneCount - 1) + GRAPH_TRAILING_SPACE;
+
+  return (
+    <svg
+      aria-hidden="true"
+      className="shrink-0 overflow-visible"
+      height={ROW_HEIGHT}
+      width={width}
+      viewBox={`0 0 ${width} ${ROW_HEIGHT}`}
+    >
+      {row.before.map((source, sourceLane) => {
+        if (sourceLane === row.lane) {
+          return isFirst ? null : (
+            <line
+              key={`incoming-${source.hash}`}
+              className={laneStyle(source.color).stroke}
+              x1={laneX(sourceLane)}
+              x2={laneX(sourceLane)}
+              y1={0}
+              y2={centerY}
+              strokeLinecap="round"
+              strokeWidth={2}
+            />
+          );
+        }
+
+        const destinationLane = row.after.findIndex(
+          (item) => item.hash === source.hash,
+        );
+        if (destinationLane === -1) return null;
+        return (
+          <path
+            key={`carry-${source.hash}-${sourceLane}`}
+            className={laneStyle(source.color).stroke}
+            d={`M ${laneX(sourceLane)} 0 C ${laneX(sourceLane)} ${centerY}, ${laneX(destinationLane)} ${centerY}, ${laneX(destinationLane)} ${ROW_HEIGHT}`}
+            fill="none"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={2}
+          />
+        );
+      })}
+
+      {row.parents.map((parent, parentIndex) => {
+        const destinationLane = row.after.findIndex(
+          (item) => item.hash === parent,
+        );
+        if (destinationLane === -1) return null;
+        const color =
+          parentIndex === 0 ? row.color : row.after[destinationLane].color;
+        return (
+          <path
+            key={`parent-${parent}`}
+            className={laneStyle(color).stroke}
+            d={`M ${laneX(row.lane)} ${centerY} C ${laneX(row.lane)} ${centerY + 10}, ${laneX(destinationLane)} ${centerY + 10}, ${laneX(destinationLane)} ${ROW_HEIGHT}`}
+            fill="none"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+            strokeWidth={2}
+          />
+        );
+      })}
+
+      <circle
+        className={`${laneStyle(row.color).stroke} ${row.parents.length > 1 ? "fill-background" : laneStyle(row.color).fill}`}
+        cx={laneX(row.lane)}
+        cy={centerY}
+        r={row.parents.length > 1 ? 5 : 4}
+        strokeWidth={2}
+      />
+    </svg>
+  );
+}
+
+function RefBadge({ refItem }: { refItem: GitGraphCommit["refs"][number] }) {
+  const classes = {
+    head: "border-blue-500 bg-blue-500 text-white",
+    local: "border-amber-400 bg-amber-400 text-amber-950",
+    remote: "border-orange-500 bg-orange-500 text-white",
+    tag: "border-pink-500 bg-pink-500 text-white",
+  }[refItem.kind];
+
+  return (
+    <span className={`inline-flex h-5 max-w-48 items-center gap-1 truncate rounded px-1.5 text-[11px] font-medium ${classes}`}>
+      <Icon name={refItem.kind === "tag" ? "Star" : "GitBranch"} className="size-3 shrink-0" />
+      <span className="truncate">{refItem.name}</span>
+    </span>
+  );
+}
+
+function relativeTime(value: string): string {
+  const timestamp = Date.parse(value);
+  if (!Number.isFinite(timestamp)) return "";
+  const seconds = Math.max(0, Math.round((Date.now() - timestamp) / 1_000));
+  if (seconds < 60) return "now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h`;
+  const days = Math.floor(hours / 24);
+  if (days < 30) return `${days}d`;
+  const months = Math.floor(days / 30);
+  if (months < 12) return `${months}mo`;
+  return `${Math.floor(months / 12)}y`;
+}
+
+function EmptyGraph({ message }: { message: string }) {
+  return (
+    <div className="flex min-h-48 flex-1 flex-col items-center justify-center gap-2 px-6 text-center">
+      <Icon name="GitBranch" className="size-6 text-muted-foreground" aria-hidden="true" />
+      <p className="max-w-sm text-sm text-muted-foreground">{message}</p>
+    </div>
+  );
+}
+
+function GitGraphPanel({ threadId }: PluginThreadPanelProps) {
+  const rpc = useRpc<typeof rpcContract>();
+  const [result, setResult] = useState<GitGraphResult | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
+  const [appendError, setAppendError] = useState<string | null>(null);
+  const [requestId, setRequestId] = useState(0);
+  const loadingRef = useRef(false);
+  const generationRef = useRef(0);
+
+  const refresh = useCallback(() => {
+    generationRef.current += 1;
+    loadingRef.current = false;
+    setRequestId((value) => value + 1);
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+    const generation = generationRef.current;
+    loadingRef.current = true;
+    setIsLoading(true);
+    setAppendError(null);
+    setResult(null);
+    void rpc
+      .call("gitGraph", { threadId, offset: 0, limit: PAGE_SIZE })
+      .then((nextResult) => {
+        if (!cancelled && generation === generationRef.current) {
+          setResult(nextResult);
+        }
+      })
+      .catch((error: unknown) => {
+        if (!cancelled && generation === generationRef.current) {
+          setResult({
+            repository: null,
+            commits: [],
+            truncated: false,
+            error: error instanceof Error ? error.message : "Git history could not be loaded.",
+          });
+        }
+      })
+      .finally(() => {
+        if (!cancelled && generation === generationRef.current) {
+          loadingRef.current = false;
+          setIsLoading(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [requestId, rpc, threadId]);
+
+  const canLoadMore = Boolean(
+    result &&
+      !result.error &&
+      result.truncated &&
+      result.commits.length < MAX_COMMITS,
+  );
+
+  const loadMore = useCallback(() => {
+    if (!result || !canLoadMore || loadingRef.current) return;
+
+    const offset = result.commits.length;
+    const limit = Math.min(PAGE_SIZE, MAX_COMMITS - offset);
+    const generation = generationRef.current;
+    loadingRef.current = true;
+    setIsLoading(true);
+    setAppendError(null);
+
+    void rpc
+      .call("gitGraph", { threadId, offset, limit })
+      .then((page) => {
+        if (generation !== generationRef.current) return;
+        if (page.error) {
+          setAppendError(page.error);
+          setResult((current) => current ? { ...current, truncated: false } : page);
+          return;
+        }
+
+        setResult((current) => {
+          if (!current || current.commits.length !== offset) return current;
+          const commits = [...current.commits, ...page.commits].slice(0, MAX_COMMITS);
+          return {
+            repository: current.repository ?? page.repository,
+            commits,
+            truncated: page.truncated && commits.length < MAX_COMMITS,
+            error: null,
+          };
+        });
+      })
+      .catch((error: unknown) => {
+        if (generation !== generationRef.current) return;
+        setAppendError(
+          error instanceof Error ? error.message : "More commits could not be loaded.",
+        );
+        setResult((current) => current ? { ...current, truncated: false } : current);
+      })
+      .finally(() => {
+        if (generation === generationRef.current) {
+          loadingRef.current = false;
+          setIsLoading(false);
+        }
+      });
+  }, [canLoadMore, result, rpc, threadId]);
+
+  const rows = useMemo(() => buildRows(result?.commits ?? []), [result?.commits]);
+
+  return (
+    <div className="flex h-full min-h-0 flex-col bg-background text-foreground">
+      <div className="flex h-11 shrink-0 items-center gap-2 border-b border-border px-3">
+        <div className="min-w-0 flex-1">
+          <div className="truncate text-sm font-medium">
+            {result?.repository?.name ?? "Repository graph"}
+          </div>
+          {result?.repository?.branch ? (
+            <div className="flex items-center gap-1 truncate text-[11px] text-muted-foreground">
+              <Icon name="GitBranch" className="size-3" aria-hidden="true" />
+              <span className="truncate">{result.repository.branch}</span>
+            </div>
+          ) : null}
+        </div>
+        {result ? (
+          <span className="shrink-0 text-[11px] tabular-nums text-muted-foreground">
+            {result.commits.length} / {MAX_COMMITS}
+          </span>
+        ) : null}
+        <Button
+          aria-label="Refresh Git graph"
+          className="size-7"
+          disabled={isLoading}
+          size="icon"
+          variant="ghost"
+          onClick={refresh}
+        >
+          <Icon name={isLoading ? "Spinner" : "RotateCcw"} className={isLoading ? "animate-spin" : ""} />
+        </Button>
+      </div>
+
+      {isLoading && !result ? (
+        <EmptyGraph message="Loading commit history..." />
+      ) : result?.error ? (
+        <EmptyGraph message={result.error} />
+      ) : rows.length === 0 ? (
+        <EmptyGraph message="No commits found in this repository." />
+      ) : (
+        <div
+          className="min-h-0 flex-1 overflow-auto"
+          onScroll={(event) => {
+            const target = event.currentTarget;
+            if (
+              target.scrollHeight - target.scrollTop - target.clientHeight <=
+              LOAD_MORE_THRESHOLD
+            ) {
+              loadMore();
+            }
+          }}
+        >
+          <div className="min-w-max py-1">
+            {rows.map((row, index) => (
+              <div
+                className="flex h-[52px] min-w-0 items-stretch pr-3 hover:bg-state-hover"
+                key={row.hash}
+              >
+                <GraphCell row={row} isFirst={index === 0} />
+                <div className="flex min-w-64 flex-1 flex-col justify-center overflow-hidden py-1">
+                  <div className="flex min-w-0 items-center gap-1.5">
+                    <span className="truncate text-sm font-medium">{row.subject}</span>
+                    {row.refs.map((refItem) => (
+                      <RefBadge key={`${refItem.kind}-${refItem.name}`} refItem={refItem} />
+                    ))}
+                  </div>
+                  <div className="mt-0.5 flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
+                    <span className="font-mono">{row.shortHash}</span>
+                    <span className="truncate">{row.author}</span>
+                    <span className="shrink-0">{relativeTime(row.authoredAt)}</span>
+                  </div>
+                </div>
+              </div>
+            ))}
+            {isLoading ? (
+              <div className="flex h-10 items-center justify-center text-muted-foreground">
+                <Icon name="Spinner" className="size-4 animate-spin" aria-label="Loading more commits" />
+              </div>
+            ) : appendError ? (
+              <div className="flex h-10 items-center justify-center px-4 text-xs text-destructive">
+                {appendError}
+              </div>
+            ) : null}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function GitGraphHeaderAction({ isCompactViewport }: PluginThreadHeaderActionProps) {
+  const navigate = useBbNavigate();
+  return (
+    <Button
+      aria-label="Open Git graph"
+      className={isCompactViewport ? "size-7" : "h-7 gap-1.5 px-2 text-xs"}
+      size={isCompactViewport ? "icon" : "sm"}
+      variant="ghost"
+      onClick={() => navigate.openThreadPanel({ actionId: "git-graph", title: "Git Graph" })}
+    >
+      <Icon name="GitBranch" />
+      {isCompactViewport ? null : <span>Graph</span>}
+    </Button>
+  );
+}
+
+export default definePluginApp((app) => {
+  app.slots.threadPanelAction({
+    id: "git-graph",
+    title: "Git Graph",
+    icon: "GitBranch",
+    layout: "flush",
+    component: GitGraphPanel,
+  });
+
+  app.slots.experimental_threadHeaderAction({
+    id: "git-graph-header",
+    title: "Git Graph",
+    component: GitGraphHeaderAction,
+  });
+});
