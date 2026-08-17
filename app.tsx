@@ -12,26 +12,25 @@ import { Icon } from "@/components/ui/icon";
 
 type GraphLane = {
   hash: string;
-  color: number;
+  color: string;
 };
 
 type GraphRow = GitGraphCommit & {
   before: GraphLane[];
   after: GraphLane[];
   lane: number;
-  color: number;
+  color: string;
 };
 
-const LANE_STYLES = [
-  { stroke: "stroke-blue-500", fill: "fill-blue-500" },
-  { stroke: "stroke-orange-500", fill: "fill-orange-500" },
-  { stroke: "stroke-amber-400", fill: "fill-amber-400" },
-  { stroke: "stroke-pink-500", fill: "fill-pink-500" },
-  { stroke: "stroke-emerald-500", fill: "fill-emerald-500" },
-  { stroke: "stroke-violet-500", fill: "fill-violet-500" },
-  { stroke: "stroke-cyan-500", fill: "fill-cyan-500" },
-  { stroke: "stroke-red-500", fill: "fill-red-500" },
+const VSCODE_GRAPH_COLORS = [
+  "#FFB000",
+  "#DC267F",
+  "#994F00",
+  "#40B0A6",
+  "#B66DFF",
 ];
+const VSCODE_CURRENT_REF_COLOR = "#59A4F9";
+const VSCODE_BASE_REF_COLOR = "#EA5C00";
 const LANE_GAP = 14;
 const GRAPH_PADDING = 13;
 const GRAPH_TRAILING_SPACE = 18;
@@ -40,24 +39,46 @@ const PAGE_SIZE = 50;
 const MAX_COMMITS = 200;
 const LOAD_MORE_THRESHOLD = 240;
 
+function refLaneColor(commit: GitGraphCommit): string | undefined {
+  if (commit.refs.some((refItem) => refItem.kind === "head")) {
+    return VSCODE_CURRENT_REF_COLOR;
+  }
+
+  if (commit.refs.some((refItem) => refItem.kind === "base")) {
+    return VSCODE_BASE_REF_COLOR;
+  }
+
+  const remoteRef = commit.refs.find((refItem) => refItem.kind === "remote");
+  if (remoteRef && /(^|\/)(main|master)$/.test(remoteRef.name)) {
+    return VSCODE_BASE_REF_COLOR;
+  }
+
+  return undefined;
+}
+
 function buildRows(commits: GitGraphCommit[]): GraphRow[] {
   let lanes: GraphLane[] = [];
   let nextColor = 0;
 
   const allocateColor = () => {
-    const color = nextColor;
-    nextColor = (nextColor + 1) % LANE_STYLES.length;
+    const color = VSCODE_GRAPH_COLORS[nextColor];
+    nextColor = (nextColor + 1) % VSCODE_GRAPH_COLORS.length;
     return color;
   };
 
   return commits.map((commit) => {
+    const refColor = refLaneColor(commit);
     let lane = lanes.findIndex((item) => item.hash === commit.hash);
     if (lane === -1) {
       lane = 0;
-      lanes = [{ hash: commit.hash, color: allocateColor() }, ...lanes];
+      lanes = [
+        { hash: commit.hash, color: refColor ?? allocateColor() },
+        ...lanes,
+      ];
     }
 
     const currentLane = lanes[lane];
+    const color = refColor ?? currentLane.color;
     const before = [...lanes];
     const after = lanes.filter((item) => item.hash !== commit.hash);
     let insertionIndex = Math.min(lane, after.length);
@@ -66,22 +87,18 @@ function buildRows(commits: GitGraphCommit[]): GraphRow[] {
       if (after.some((item) => item.hash === parent)) return;
       after.splice(insertionIndex, 0, {
         hash: parent,
-        color: parentIndex === 0 ? currentLane.color : allocateColor(),
+        color: parentIndex === 0 ? color : allocateColor(),
       });
       insertionIndex += 1;
     });
 
     lanes = after;
-    return { ...commit, before, after, lane, color: currentLane.color };
+    return { ...commit, before, after, lane, color };
   });
 }
 
 function laneX(lane: number): number {
   return GRAPH_PADDING + lane * LANE_GAP;
-}
-
-function laneStyle(color: number) {
-  return LANE_STYLES[color % LANE_STYLES.length];
 }
 
 function GraphCell({ row, isFirst }: { row: GraphRow; isFirst: boolean }) {
@@ -102,7 +119,7 @@ function GraphCell({ row, isFirst }: { row: GraphRow; isFirst: boolean }) {
           return isFirst ? null : (
             <line
               key={`incoming-${source.hash}`}
-              className={laneStyle(source.color).stroke}
+              stroke={source.color}
               x1={laneX(sourceLane)}
               x2={laneX(sourceLane)}
               y1={0}
@@ -120,7 +137,7 @@ function GraphCell({ row, isFirst }: { row: GraphRow; isFirst: boolean }) {
         return (
           <path
             key={`carry-${source.hash}-${sourceLane}`}
-            className={laneStyle(source.color).stroke}
+            stroke={source.color}
             d={`M ${laneX(sourceLane)} 0 C ${laneX(sourceLane)} ${centerY}, ${laneX(destinationLane)} ${centerY}, ${laneX(destinationLane)} ${ROW_HEIGHT}`}
             fill="none"
             strokeLinecap="round"
@@ -140,7 +157,7 @@ function GraphCell({ row, isFirst }: { row: GraphRow; isFirst: boolean }) {
         return (
           <path
             key={`parent-${parent}`}
-            className={laneStyle(color).stroke}
+            stroke={color}
             d={`M ${laneX(row.lane)} ${centerY} C ${laneX(row.lane)} ${centerY + 10}, ${laneX(destinationLane)} ${centerY + 10}, ${laneX(destinationLane)} ${ROW_HEIGHT}`}
             fill="none"
             strokeLinecap="round"
@@ -151,26 +168,30 @@ function GraphCell({ row, isFirst }: { row: GraphRow; isFirst: boolean }) {
       })}
 
       <circle
-        className={`${laneStyle(row.color).stroke} ${row.parents.length > 1 ? "fill-background" : laneStyle(row.color).fill}`}
+        className={row.parents.length > 1 ? "fill-background" : undefined}
         cx={laneX(row.lane)}
         cy={centerY}
+        fill={row.parents.length > 1 ? undefined : row.color}
         r={row.parents.length > 1 ? 5 : 4}
+        stroke={row.color}
         strokeWidth={2}
       />
     </svg>
   );
 }
 
-function RefBadge({ refItem }: { refItem: GitGraphCommit["refs"][number] }) {
-  const classes = {
-    head: "border-blue-500 bg-blue-500 text-white",
-    local: "border-amber-400 bg-amber-400 text-amber-950",
-    remote: "border-orange-500 bg-orange-500 text-white",
-    tag: "border-pink-500 bg-pink-500 text-white",
-  }[refItem.kind];
-
+function RefBadge({
+  refItem,
+  laneColor,
+}: {
+  refItem: GitGraphCommit["refs"][number];
+  laneColor: string;
+}) {
   return (
-    <span className={`inline-flex h-5 max-w-48 items-center gap-1 truncate rounded px-1.5 text-[11px] font-medium ${classes}`}>
+    <span
+      className="inline-flex h-5 max-w-48 items-center gap-1 truncate rounded px-1.5 text-[11px] font-medium"
+      style={{ backgroundColor: laneColor, color: "#1F1F1F" }}
+    >
       <Icon name={refItem.kind === "tag" ? "Star" : "GitBranch"} className="size-3 shrink-0" />
       <span className="truncate">{refItem.name}</span>
     </span>
@@ -369,7 +390,11 @@ function GitGraphPanel({ threadId }: PluginThreadPanelProps) {
                   <div className="flex min-w-0 items-center gap-1.5">
                     <span className="truncate text-sm font-medium">{row.subject}</span>
                     {row.refs.map((refItem) => (
-                      <RefBadge key={`${refItem.kind}-${refItem.name}`} refItem={refItem} />
+                      <RefBadge
+                        key={`${refItem.kind}-${refItem.name}`}
+                        laneColor={row.color}
+                        refItem={refItem}
+                      />
                     ))}
                   </div>
                   <div className="mt-0.5 flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">

@@ -1,8 +1,10 @@
 # bb-plugin-git-graph
 
-A compact, read-only Git history graph for bb. It opens in a thread side panel
+A compact, read-only Git history graph for [bb](https://getbb.app/). It opens in a thread side panel
 and runs Git in that thread's environment, including environments hosted on
 another connected machine.
+
+![Git Graph plugin open beside a bb thread, showing colored commit lanes and branch labels](./assets/git-graph-preview.png)
 
 ## Install
 

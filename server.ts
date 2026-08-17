@@ -3,7 +3,7 @@ import { z } from "zod";
 
 const graphRefSchema = z.object({
   name: z.string(),
-  kind: z.enum(["head", "local", "remote", "tag"]),
+  kind: z.enum(["head", "local", "remote", "base", "tag"]),
 });
 
 const graphCommitSchema = z.object({
@@ -47,6 +47,7 @@ export type GitGraphResult = z.infer<typeof graphResultSchema>;
 
 const RECORD_SEPARATOR = "\x1e";
 const FIELD_SEPARATOR = "\x1f";
+const BASE_REF_MARKER = "__BB_GIT_GRAPH_BASE_REF__";
 
 function stripAnsi(value: string): string {
   return value
@@ -57,30 +58,47 @@ function stripAnsi(value: string): string {
 
 function parseRefs(value: string): GitGraphCommit["refs"] {
   const refs: GitGraphCommit["refs"] = [];
+  const priority = { local: 0, remote: 1, tag: 2, base: 3, head: 4 } as const;
+
+  const addRef = (name: string, kind: GitGraphCommit["refs"][number]["kind"]) => {
+    const existing = refs.find((refItem) => refItem.name === name);
+    if (!existing) {
+      refs.push({ name, kind });
+    } else if (priority[kind] > priority[existing.kind]) {
+      existing.kind = kind;
+    }
+  };
 
   for (const rawRef of value.split(",")) {
     const ref = rawRef.trim();
-    if (!ref || ref.includes("refs/remotes/") && ref.includes("/HEAD -> ")) {
+    if (!ref) continue;
+
+    const remoteHead = ref.match(
+      /^refs\/remotes\/[^/]+\/HEAD -> refs\/remotes\/(.+)$/,
+    );
+    if (remoteHead) {
+      addRef(remoteHead[1], "base");
       continue;
     }
 
     if (ref.startsWith("HEAD -> refs/heads/")) {
-      refs.push({ name: ref.slice("HEAD -> refs/heads/".length), kind: "head" });
+      addRef(ref.slice("HEAD -> refs/heads/".length), "head");
     } else if (ref.startsWith("refs/heads/")) {
-      refs.push({ name: ref.slice("refs/heads/".length), kind: "local" });
+      addRef(ref.slice("refs/heads/".length), "local");
     } else if (ref.startsWith("refs/remotes/")) {
-      refs.push({ name: ref.slice("refs/remotes/".length), kind: "remote" });
+      const name = ref.slice("refs/remotes/".length);
+      if (!name.endsWith("/HEAD")) addRef(name, "remote");
     } else if (ref.startsWith("tag: refs/tags/")) {
-      refs.push({ name: ref.slice("tag: refs/tags/".length), kind: "tag" });
+      addRef(ref.slice("tag: refs/tags/".length), "tag");
     } else if (ref.startsWith("refs/tags/")) {
-      refs.push({ name: ref.slice("refs/tags/".length), kind: "tag" });
+      addRef(ref.slice("refs/tags/".length), "tag");
     }
   }
 
   return refs;
 }
 
-export function parseGitLog(output: string): GitGraphCommit[] {
+export function parseGitLog(output: string, baseRef?: string): GitGraphCommit[] {
   return stripAnsi(output)
     .split(RECORD_SEPARATOR)
     .map((record) => record.trim())
@@ -98,7 +116,11 @@ export function parseGitLog(output: string): GitGraphCommit[] {
           subject,
           author,
           authoredAt,
-          refs: parseRefs(refs),
+          refs: parseRefs(refs).map((refItem) =>
+            refItem.kind === "remote" && refItem.name === baseRef
+              ? { ...refItem, kind: "base" as const }
+              : refItem,
+          ),
         },
       ];
     });
@@ -155,6 +177,7 @@ async function runGitLog(
     await wait(25);
 
     const command = [
+      `printf '${BASE_REF_MARKER}:%s\\n' "$(git for-each-ref --count=1 --format='%(symref:short)' 'refs/remotes/*/HEAD')"`,
       `git --no-pager log --topo-order --branches --remotes --tags HEAD --decorate=full --no-color --format='${format}' --skip=${offset} --max-count=${limit + 1}`,
       "bb_git_graph_exit=$?",
       `printf '\\n${completionMarker}:%s\\n' "$bb_git_graph_exit"`,
@@ -231,7 +254,10 @@ async function loadGraph(
       return graphError(message || "Git could not read this repository.");
     }
 
-    const allCommits = parseGitLog(cleanedOutput);
+    const baseRef = cleanedOutput
+      .match(new RegExp(`^${BASE_REF_MARKER}:(.*)$`, "m"))?.[1]
+      .trim();
+    const allCommits = parseGitLog(cleanedOutput, baseRef);
     const commits = allCommits.slice(0, limit);
     const repositoryName = environment.path.split(/[\\/]/).filter(Boolean).at(-1) ?? environment.path;
 
