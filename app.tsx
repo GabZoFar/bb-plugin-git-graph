@@ -5,8 +5,13 @@ import {
   useRpc,
   type PluginThreadHeaderActionProps,
   type PluginThreadPanelProps,
-} from "@bb/plugin-sdk/app";
-import type { GitGraphCommit, GitGraphResult, rpcContract } from "./server";
+} from "@get-bb/plugin-sdk/app";
+import type {
+  GitGraphCommit,
+  GitGraphRepository,
+  GitGraphResult,
+  rpcContract,
+} from "./server";
 import { Button } from "@/components/ui/button";
 import { Icon } from "@/components/ui/icon";
 
@@ -31,10 +36,18 @@ const VSCODE_GRAPH_COLORS = [
 ];
 const VSCODE_CURRENT_REF_COLOR = "#59A4F9";
 const VSCODE_BASE_REF_COLOR = "#EA5C00";
+const BADGE_DARK_TEXT = "#1F1F1F";
+const BADGE_LIGHT_TEXT = "#FFFFFF";
+const FORCED_LIGHT_BADGE_TEXT_COLORS = new Set([
+  VSCODE_CURRENT_REF_COLOR,
+  "#40B0A6",
+  "#B66DFF",
+]);
 const LANE_GAP = 14;
 const GRAPH_PADDING = 13;
 const GRAPH_TRAILING_SPACE = 18;
-const ROW_HEIGHT = 52;
+const GRAPH_CURVE_OFFSET = 6;
+const ROW_HEIGHT = 26;
 const PAGE_SIZE = 50;
 const MAX_COMMITS = 200;
 const LOAD_MORE_THRESHOLD = 240;
@@ -101,6 +114,44 @@ function laneX(lane: number): number {
   return GRAPH_PADDING + lane * LANE_GAP;
 }
 
+function relativeLuminance(color: string): number | null {
+  const match = color.match(/^#([0-9a-f]{6})$/i);
+  if (!match) return null;
+
+  const channels = match[1].match(/.{2}/g)?.map((channel) => {
+    const value = Number.parseInt(channel, 16) / 255;
+    return value <= 0.04045
+      ? value / 12.92
+      : ((value + 0.055) / 1.055) ** 2.4;
+  });
+  if (!channels || channels.length !== 3) return null;
+
+  return 0.2126 * channels[0] + 0.7152 * channels[1] + 0.0722 * channels[2];
+}
+
+function contrastRatio(first: number, second: number): number {
+  const lighter = Math.max(first, second);
+  const darker = Math.min(first, second);
+  return (lighter + 0.05) / (darker + 0.05);
+}
+
+function badgeTextColor(backgroundColor: string): string {
+  if (FORCED_LIGHT_BADGE_TEXT_COLORS.has(backgroundColor.toUpperCase())) {
+    return BADGE_LIGHT_TEXT;
+  }
+
+  const backgroundLuminance = relativeLuminance(backgroundColor);
+  const darkTextLuminance = relativeLuminance(BADGE_DARK_TEXT);
+  if (backgroundLuminance === null || darkTextLuminance === null) {
+    return BADGE_DARK_TEXT;
+  }
+
+  return contrastRatio(backgroundLuminance, 1) >=
+    contrastRatio(backgroundLuminance, darkTextLuminance)
+    ? BADGE_LIGHT_TEXT
+    : BADGE_DARK_TEXT;
+}
+
 function GraphCell({ row, isFirst }: { row: GraphRow; isFirst: boolean }) {
   const centerY = ROW_HEIGHT / 2;
   const laneCount = Math.max(row.before.length, row.after.length, 1);
@@ -158,7 +209,7 @@ function GraphCell({ row, isFirst }: { row: GraphRow; isFirst: boolean }) {
           <path
             key={`parent-${parent}`}
             stroke={color}
-            d={`M ${laneX(row.lane)} ${centerY} C ${laneX(row.lane)} ${centerY + 10}, ${laneX(destinationLane)} ${centerY + 10}, ${laneX(destinationLane)} ${ROW_HEIGHT}`}
+            d={`M ${laneX(row.lane)} ${centerY} C ${laneX(row.lane)} ${centerY + GRAPH_CURVE_OFFSET}, ${laneX(destinationLane)} ${centerY + GRAPH_CURVE_OFFSET}, ${laneX(destinationLane)} ${ROW_HEIGHT}`}
             fill="none"
             strokeLinecap="round"
             strokeLinejoin="round"
@@ -190,7 +241,7 @@ function RefBadge({
   return (
     <span
       className="inline-flex h-5 max-w-48 items-center gap-1 truncate rounded px-1.5 text-[11px] font-medium"
-      style={{ backgroundColor: laneColor, color: "#1F1F1F" }}
+      style={{ backgroundColor: laneColor, color: badgeTextColor(laneColor) }}
     >
       <Icon name={refItem.kind === "tag" ? "Star" : "GitBranch"} className="size-3 shrink-0" />
       <span className="truncate">{refItem.name}</span>
@@ -225,6 +276,10 @@ function EmptyGraph({ message }: { message: string }) {
 
 function GitGraphPanel({ threadId }: PluginThreadPanelProps) {
   const rpc = useRpc<typeof rpcContract>();
+  const [repositories, setRepositories] = useState<GitGraphRepository[]>([]);
+  const [selectedRepositoryPath, setSelectedRepositoryPath] = useState<
+    string | null
+  >(null);
   const [result, setResult] = useState<GitGraphResult | null>(null);
   const [isLoading, setIsLoading] = useState(true);
   const [appendError, setAppendError] = useState<string | null>(null);
@@ -232,13 +287,79 @@ function GitGraphPanel({ threadId }: PluginThreadPanelProps) {
   const loadingRef = useRef(false);
   const generationRef = useRef(0);
 
+  useEffect(() => {
+    let cancelled = false;
+    generationRef.current += 1;
+    loadingRef.current = false;
+    setRepositories([]);
+    setSelectedRepositoryPath(null);
+    setResult(null);
+    setAppendError(null);
+    setIsLoading(true);
+
+    void rpc
+      .call("gitRepositories", { threadId })
+      .then((nextResult) => {
+        if (cancelled) return;
+        setRepositories(nextResult.repositories);
+
+        const primaryRepository =
+          nextResult.repositories.find((repository) => repository.isPrimary) ??
+          nextResult.repositories[0];
+        if (primaryRepository) {
+          setSelectedRepositoryPath(primaryRepository.path);
+          return;
+        }
+
+        setResult({
+          repository: null,
+          commits: [],
+          truncated: false,
+          error: nextResult.error ?? "No Git repositories were found.",
+        });
+        setIsLoading(false);
+      })
+      .catch((error: unknown) => {
+        if (cancelled) return;
+        setResult({
+          repository: null,
+          commits: [],
+          truncated: false,
+          error:
+            error instanceof Error
+              ? error.message
+              : "Git repositories could not be loaded.",
+        });
+        setIsLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [rpc, threadId]);
+
   const refresh = useCallback(() => {
     generationRef.current += 1;
     loadingRef.current = false;
     setRequestId((value) => value + 1);
   }, []);
 
+  const selectRepository = useCallback(
+    (repositoryPath: string) => {
+      if (repositoryPath === selectedRepositoryPath) return;
+      generationRef.current += 1;
+      loadingRef.current = false;
+      setSelectedRepositoryPath(repositoryPath);
+      setResult(null);
+      setAppendError(null);
+      setIsLoading(true);
+    },
+    [selectedRepositoryPath],
+  );
+
   useEffect(() => {
+    if (!selectedRepositoryPath) return;
+
     let cancelled = false;
     const generation = generationRef.current;
     loadingRef.current = true;
@@ -246,7 +367,12 @@ function GitGraphPanel({ threadId }: PluginThreadPanelProps) {
     setAppendError(null);
     setResult(null);
     void rpc
-      .call("gitGraph", { threadId, offset: 0, limit: PAGE_SIZE })
+      .call("gitGraph", {
+        threadId,
+        repositoryPath: selectedRepositoryPath,
+        offset: 0,
+        limit: PAGE_SIZE,
+      })
       .then((nextResult) => {
         if (!cancelled && generation === generationRef.current) {
           setResult(nextResult);
@@ -272,7 +398,7 @@ function GitGraphPanel({ threadId }: PluginThreadPanelProps) {
     return () => {
       cancelled = true;
     };
-  }, [requestId, rpc, threadId]);
+  }, [requestId, rpc, selectedRepositoryPath, threadId]);
 
   const canLoadMore = Boolean(
     result &&
@@ -282,7 +408,14 @@ function GitGraphPanel({ threadId }: PluginThreadPanelProps) {
   );
 
   const loadMore = useCallback(() => {
-    if (!result || !canLoadMore || loadingRef.current) return;
+    if (
+      !result ||
+      !selectedRepositoryPath ||
+      !canLoadMore ||
+      loadingRef.current
+    ) {
+      return;
+    }
 
     const offset = result.commits.length;
     const limit = Math.min(PAGE_SIZE, MAX_COMMITS - offset);
@@ -292,7 +425,12 @@ function GitGraphPanel({ threadId }: PluginThreadPanelProps) {
     setAppendError(null);
 
     void rpc
-      .call("gitGraph", { threadId, offset, limit })
+      .call("gitGraph", {
+        threadId,
+        repositoryPath: selectedRepositoryPath,
+        offset,
+        limit,
+      })
       .then((page) => {
         if (generation !== generationRef.current) return;
         if (page.error) {
@@ -325,17 +463,61 @@ function GitGraphPanel({ threadId }: PluginThreadPanelProps) {
           setIsLoading(false);
         }
       });
-  }, [canLoadMore, result, rpc, threadId]);
+  }, [canLoadMore, result, rpc, selectedRepositoryPath, threadId]);
 
   const rows = useMemo(() => buildRows(result?.commits ?? []), [result?.commits]);
+  const selectedRepository = useMemo(
+    () =>
+      repositories.find(
+        (repository) => repository.path === selectedRepositoryPath,
+      ) ?? null,
+    [repositories, selectedRepositoryPath],
+  );
 
   return (
     <div className="flex h-full min-h-0 flex-col bg-background text-foreground">
       <div className="flex h-11 shrink-0 items-center gap-2 border-b border-border px-3">
         <div className="min-w-0 flex-1">
-          <div className="truncate text-sm font-medium">
-            {result?.repository?.name ?? "Repository graph"}
-          </div>
+          {repositories.length > 1 && selectedRepositoryPath ? (
+            <label className="relative inline-flex h-5 max-w-full cursor-pointer items-center gap-1 rounded px-0.5 text-sm font-medium hover:bg-state-hover focus-within:ring-1 focus-within:ring-ring">
+              <Icon
+                name="Laptop"
+                className="size-3.5 shrink-0 text-muted-foreground"
+                aria-hidden="true"
+              />
+              <span className="truncate">
+                {selectedRepository?.name ?? "Repository graph"}
+              </span>
+              <Icon
+                name="ChevronDown"
+                className="size-3 shrink-0 text-muted-foreground"
+                aria-hidden="true"
+              />
+              <select
+                aria-label="Repository"
+                className="absolute inset-0 size-full cursor-pointer opacity-0"
+                value={selectedRepositoryPath}
+                onChange={(event) => selectRepository(event.target.value)}
+              >
+                {repositories.map((repository) => (
+                  <option key={repository.path} value={repository.path}>
+                    {repository.name}  {repository.path}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : (
+            <div className="flex min-w-0 items-center gap-1 text-sm font-medium">
+              <Icon
+                name="Laptop"
+                className="size-3.5 shrink-0 text-muted-foreground"
+                aria-hidden="true"
+              />
+              <span className="truncate">
+                {selectedRepository?.name ?? result?.repository?.name ?? "Repository graph"}
+              </span>
+            </div>
+          )}
           {result?.repository?.branch ? (
             <div className="flex items-center gap-1 truncate text-[11px] text-muted-foreground">
               <Icon name="GitBranch" className="size-3" aria-hidden="true" />
@@ -379,16 +561,19 @@ function GitGraphPanel({ threadId }: PluginThreadPanelProps) {
             }
           }}
         >
-          <div className="min-w-max py-1">
+          <div className="min-w-full py-1">
             {rows.map((row, index) => (
               <div
-                className="flex h-[52px] min-w-0 items-stretch pr-3 hover:bg-state-hover"
+                className="flex min-w-0 items-stretch pr-3 hover:bg-state-hover"
                 key={row.hash}
+                style={{ height: ROW_HEIGHT }}
               >
                 <GraphCell row={row} isFirst={index === 0} />
-                <div className="flex min-w-64 flex-1 flex-col justify-center overflow-hidden py-1">
-                  <div className="flex min-w-0 items-center gap-1.5">
-                    <span className="truncate text-sm font-medium">{row.subject}</span>
+                <div className="flex min-w-64 flex-1 items-center overflow-hidden">
+                  <div className="flex min-w-0 flex-1 items-center gap-1.5 overflow-hidden">
+                    <span className="truncate text-sm font-medium leading-5">
+                      {row.subject}
+                    </span>
                     {row.refs.map((refItem) => (
                       <RefBadge
                         key={`${refItem.kind}-${refItem.name}`}
@@ -397,8 +582,7 @@ function GitGraphPanel({ threadId }: PluginThreadPanelProps) {
                       />
                     ))}
                   </div>
-                  <div className="mt-0.5 flex min-w-0 items-center gap-2 text-[11px] text-muted-foreground">
-                    <span className="font-mono">{row.shortHash}</span>
+                  <div className="ml-2 flex max-w-48 shrink-0 items-center gap-1.5 text-[11px] leading-4 text-muted-foreground">
                     <span className="truncate">{row.author}</span>
                     <span className="shrink-0">{relativeTime(row.authoredAt)}</span>
                   </div>

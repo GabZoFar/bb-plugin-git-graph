@@ -1,4 +1,4 @@
-import { defineRpcContract, type BbPluginApi } from "@bb/plugin-sdk";
+import { defineRpcContract, type BbPluginApi } from "@get-bb/plugin-sdk";
 import { z } from "zod";
 
 const graphRefSchema = z.object({
@@ -29,13 +29,40 @@ const graphResultSchema = z.object({
   error: z.string().nullable(),
 });
 
+const graphRepositorySchema = z.object({
+  name: z.string(),
+  path: z.string(),
+  isPrimary: z.boolean(),
+});
+
+const graphRepositoriesResultSchema = z.object({
+  repositories: z.array(graphRepositorySchema),
+  error: z.string().nullable(),
+});
+
+const claudeSettingsSchema = z
+  .object({
+    permissions: z
+      .object({
+        additionalDirectories: z.array(z.string()).optional(),
+      })
+      .passthrough()
+      .optional(),
+  })
+  .passthrough();
+
 export const rpcContract = defineRpcContract({
+  gitRepositories: {
+    input: z.object({ threadId: z.string().min(1) }).strict(),
+    output: graphRepositoriesResultSchema,
+  },
   gitGraph: {
     input: z
       .object({
         threadId: z.string().min(1),
         offset: z.number().int().min(0).max(199).optional(),
         limit: z.number().int().min(1).max(50).optional(),
+        repositoryPath: z.string().min(1).max(4096).optional(),
       })
       .strict(),
     output: graphResultSchema,
@@ -44,10 +71,18 @@ export const rpcContract = defineRpcContract({
 
 export type GitGraphCommit = z.infer<typeof graphCommitSchema>;
 export type GitGraphResult = z.infer<typeof graphResultSchema>;
+export type GitGraphRepository = z.infer<typeof graphRepositorySchema>;
+export type GitGraphRepositoriesResult = z.infer<
+  typeof graphRepositoriesResultSchema
+>;
 
 const RECORD_SEPARATOR = "\x1e";
 const FIELD_SEPARATOR = "\x1f";
 const BASE_REF_MARKER = "__BB_GIT_GRAPH_BASE_REF__";
+const BRANCH_REF_MARKER = "__BB_GIT_GRAPH_BRANCH_REF__";
+const SETTINGS_START_MARKER = "__BB_GIT_GRAPH_SETTINGS_START__";
+const SETTINGS_END_MARKER = "__BB_GIT_GRAPH_SETTINGS_END__";
+const REPOSITORY_PATH_MARKER = "__BB_GIT_GRAPH_REPOSITORY_PATH__";
 
 function stripAnsi(value: string): string {
   return value
@@ -139,21 +174,24 @@ function wait(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
-async function runGitLog(
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+async function runEnvironmentCommand(
   bb: BbPluginApi,
   environmentId: string,
-  offset: number,
-  limit: number,
+  command: string,
+  title: string,
 ): Promise<{ output: string; exitCode: number | null }> {
-  const format = "%x1e%H%x1f%P%x1f%D%x1f%s%x1f%an%x1f%aI";
-  const completionMarker = "__BB_GIT_GRAPH_DONE__";
   const terminal = await bb.sdk.terminals.create({
     scope: { kind: "environment", environmentId },
     cols: 500,
     rows: 24,
     start: { mode: "shell" },
-    title: "Git Graph query",
+    title,
   });
+  const completionMarker = `__BB_GIT_GRAPH_DONE_${terminal.id.replace(/\W/g, "_")}__`;
 
   try {
     let session = terminal;
@@ -176,15 +214,14 @@ async function runGitLog(
     });
     await wait(25);
 
-    const command = [
-      `printf '${BASE_REF_MARKER}:%s\\n' "$(git for-each-ref --count=1 --format='%(symref:short)' 'refs/remotes/*/HEAD')"`,
-      `git --no-pager log --topo-order --branches --remotes --tags HEAD --decorate=full --no-color --format='${format}' --skip=${offset} --max-count=${limit + 1}`,
+    const wrappedCommand = [
+      command,
       "bb_git_graph_exit=$?",
       `printf '\\n${completionMarker}:%s\\n' "$bb_git_graph_exit"`,
     ].join("; ");
     await bb.sdk.terminals.input({
       terminalId: terminal.id,
-      dataBase64: Buffer.from(`${command}\n`, "utf8").toString("base64"),
+      dataBase64: Buffer.from(`${wrappedCommand}\n`, "utf8").toString("base64"),
     });
 
     let nextSeq = 0;
@@ -224,6 +261,170 @@ async function runGitLog(
   }
 }
 
+async function runGitLog(
+  bb: BbPluginApi,
+  environmentId: string,
+  repositoryPath: string,
+  offset: number,
+  limit: number,
+): Promise<{ output: string; exitCode: number | null }> {
+  const format = "%x1e%H%x1f%P%x1f%D%x1f%s%x1f%an%x1f%aI";
+  const path = shellQuote(repositoryPath);
+  const command = [
+    `printf '${BRANCH_REF_MARKER}:%s\\n' "$(git -C ${path} branch --show-current 2>/dev/null)"`,
+    `printf '${BASE_REF_MARKER}:%s\\n' "$(git -C ${path} for-each-ref --count=1 --format='%(symref:short)' 'refs/remotes/*/HEAD')"`,
+    `git -C ${path} --no-pager log --topo-order --branches --remotes --tags HEAD --decorate=full --no-color --format='${format}' --skip=${offset} --max-count=${limit + 1}`,
+  ].join("; ");
+
+  return runEnvironmentCommand(
+    bb,
+    environmentId,
+    command,
+    `Git Graph: ${repositoryPath.split(/[\\/]/).filter(Boolean).at(-1) ?? repositoryPath}`,
+  );
+}
+
+function repositoryName(repositoryPath: string): string {
+  return repositoryPath.split(/[\\/]/).filter(Boolean).at(-1) ?? repositoryPath;
+}
+
+async function readAdditionalDirectories(
+  bb: BbPluginApi,
+  environmentId: string,
+  workspacePath: string,
+): Promise<string[]> {
+  const settingsFiles = [
+    `${workspacePath}/.claude/settings.json`,
+    `${workspacePath}/.claude/settings.local.json`,
+  ];
+  const command = settingsFiles
+    .map((settingsFile) => {
+      const path = shellQuote(settingsFile);
+      return [
+        `printf '${SETTINGS_START_MARKER}:%s\\n' ${path}`,
+        `if [ -f ${path} ]; then cat ${path}; fi`,
+        `printf '\\n${SETTINGS_END_MARKER}\\n'`,
+      ].join("; ");
+    })
+    .join("; ");
+  const result = await runEnvironmentCommand(
+    bb,
+    environmentId,
+    command,
+    "Git Graph repository settings",
+  );
+  if (result.exitCode !== 0) return [];
+
+  const directories: string[] = [];
+  const settingsPattern = new RegExp(
+    `^${SETTINGS_START_MARKER}:([^\\n]*)\\n([\\s\\S]*?)^${SETTINGS_END_MARKER}$`,
+    "gm",
+  );
+  for (const match of result.output.matchAll(settingsPattern)) {
+    const content = match[2].trim();
+    if (!content) continue;
+
+    try {
+      const settings = claudeSettingsSchema.parse(JSON.parse(content));
+      directories.push(...(settings.permissions?.additionalDirectories ?? []));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "invalid JSON";
+      bb.log.warn(`could not read ${match[1]}: ${message}`);
+    }
+  }
+
+  return directories;
+}
+
+async function canonicalizeRepositories(
+  bb: BbPluginApi,
+  environmentId: string,
+  workspacePath: string,
+  candidates: string[],
+): Promise<string[]> {
+  const workspace = shellQuote(workspacePath);
+  const candidateArguments = candidates.map(shellQuote).join(" ");
+  const command = [
+    `bb_git_graph_workspace=${workspace}`,
+    `for bb_git_graph_candidate in ${candidateArguments}; do`,
+    `case "$bb_git_graph_candidate" in /*) ;; "~") bb_git_graph_candidate="$HOME" ;; "~/"*) bb_git_graph_candidate="$HOME/\${bb_git_graph_candidate#~/}" ;; *) bb_git_graph_candidate="$bb_git_graph_workspace/$bb_git_graph_candidate" ;; esac`,
+    `bb_git_graph_root="$(git -C "$bb_git_graph_candidate" rev-parse --show-toplevel 2>/dev/null)"`,
+    `if [ -n "$bb_git_graph_root" ]; then printf '${REPOSITORY_PATH_MARKER}:%s\\n' "$bb_git_graph_root"; fi`,
+    "done",
+  ].join("; ");
+  const result = await runEnvironmentCommand(
+    bb,
+    environmentId,
+    command,
+    "Git Graph repository discovery",
+  );
+  if (result.exitCode !== 0) return [];
+
+  const repositories = stripAnsi(result.output)
+    .split("\n")
+    .filter((line) => line.startsWith(`${REPOSITORY_PATH_MARKER}:`))
+    .map((line) => line.slice(REPOSITORY_PATH_MARKER.length + 1).trim())
+    .filter(Boolean);
+  return [...new Set(repositories)];
+}
+
+async function discoverRepositories(
+  bb: BbPluginApi,
+  threadId: string,
+): Promise<GitGraphRepositoriesResult> {
+  const thread = await bb.sdk.threads.get({ threadId });
+  if (!thread.environmentId) {
+    return { repositories: [], error: "This thread does not have a workspace." };
+  }
+
+  const environment = await bb.sdk.environments.get({
+    environmentId: thread.environmentId,
+  });
+  if (!environment.isGitRepo || !environment.path) {
+    return { repositories: [], error: "This workspace is not a Git repository." };
+  }
+
+  try {
+    const additionalDirectories = await readAdditionalDirectories(
+      bb,
+      environment.id,
+      environment.path,
+    );
+    const repositoryPaths = await canonicalizeRepositories(
+      bb,
+      environment.id,
+      environment.path,
+      [environment.path, ...additionalDirectories],
+    );
+    const primaryPath = repositoryPaths[0] ?? environment.path;
+
+    return {
+      repositories: repositoryPaths.map((path) => ({
+        name: repositoryName(path),
+        path,
+        isPrimary: path === primaryPath,
+      })),
+      error: null,
+    };
+  } catch (error) {
+    const message =
+      error instanceof Error
+        ? error.message
+        : "repositories could not be loaded";
+    bb.log.warn(`repository discovery failed for ${threadId}: ${message}`);
+    return {
+      repositories: [
+        {
+          name: repositoryName(environment.path),
+          path: environment.path,
+          isPrimary: true,
+        },
+      ],
+      error: null,
+    };
+  }
+}
+
 function graphError(message: string): GitGraphResult {
   return { repository: null, commits: [], truncated: false, error: message };
 }
@@ -233,6 +434,7 @@ async function loadGraph(
   threadId: string,
   limit: number,
   offset = 0,
+  requestedRepositoryPath?: string,
 ): Promise<GitGraphResult> {
   const thread = await bb.sdk.threads.get({ threadId });
   if (!thread.environmentId) {
@@ -247,7 +449,14 @@ async function loadGraph(
   }
 
   try {
-    const result = await runGitLog(bb, environment.id, offset, limit);
+    const repositoryPath = requestedRepositoryPath ?? environment.path;
+    const result = await runGitLog(
+      bb,
+      environment.id,
+      repositoryPath,
+      offset,
+      limit,
+    );
     const cleanedOutput = stripAnsi(result.output);
     if (result.exitCode !== 0) {
       const message = cleanedOutput.trim().split("\n").slice(-2).join(" ");
@@ -257,22 +466,30 @@ async function loadGraph(
     const baseRef = cleanedOutput
       .match(new RegExp(`^${BASE_REF_MARKER}:(.*)$`, "m"))?.[1]
       .trim();
+    const branch =
+      cleanedOutput
+        .match(new RegExp(`^${BRANCH_REF_MARKER}:(.*)$`, "m"))?.[1]
+        .trim() || null;
     const allCommits = parseGitLog(cleanedOutput, baseRef);
     const commits = allCommits.slice(0, limit);
-    const repositoryName = environment.path.split(/[\\/]/).filter(Boolean).at(-1) ?? environment.path;
 
     return {
       repository: {
-        name: repositoryName,
-        path: environment.path,
-        branch: environment.branchName,
+        name: repositoryName(repositoryPath),
+        path: repositoryPath,
+        branch:
+          branch ??
+          (repositoryPath === environment.path ? environment.branchName : null),
       },
       commits,
       truncated: allCommits.length > limit,
       error: null,
     };
   } catch (error) {
-    const message = error instanceof Error ? error.message : "Git history could not be loaded.";
+    const message =
+      error instanceof Error
+        ? error.message
+        : "Git history could not be loaded.";
     bb.log.warn(`graph query failed for ${threadId}: ${message}`);
     return graphError(message);
   }
@@ -282,9 +499,17 @@ export default async function plugin(bb: BbPluginApi) {
   bb.log.info("loaded");
 
   bb.rpc.register(rpcContract, {
-    async gitGraph({ threadId, offset = 0, limit = 50 }) {
+    async gitRepositories({ threadId }) {
+      return discoverRepositories(bb, threadId);
+    },
+    async gitGraph({
+      threadId,
+      offset = 0,
+      limit = 50,
+      repositoryPath,
+    }) {
       const cappedLimit = Math.min(limit, 200 - offset);
-      return loadGraph(bb, threadId, cappedLimit, offset);
+      return loadGraph(bb, threadId, cappedLimit, offset, repositoryPath);
     },
   });
 

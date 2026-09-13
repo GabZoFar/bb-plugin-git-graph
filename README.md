@@ -53,6 +53,24 @@ branch/tag labels, authors, relative timestamps, and merge lanes.
 The panel initially loads 50 commits, then fetches the next page as you scroll
 near the bottom. It stops after the newest 200 commits.
 
+When a workspace declares additional repositories in `.claude/settings.json`
+or `.claude/settings.local.json`, the repository name in the panel header
+becomes a selector:
+
+```json
+{
+  "permissions": {
+    "additionalDirectories": [
+      "../backend",
+      "../web"
+    ]
+  }
+}
+```
+
+Each valid Git repository is resolved in the thread's environment. Selecting a
+repository resets the graph and loads its active branch and newest commits.
+
 The same backend is available to agents and terminals:
 
 ```sh

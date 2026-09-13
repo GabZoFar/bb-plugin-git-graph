@@ -18,7 +18,7 @@
   },
   "engines": {
     "bb": ">=0.36",
-    "bbPluginSdk": "^0.4.1"
+    "bbPluginSdk": ">=0.4.87"
   },
   "bb": {
     "name": "Git Graph",
@@ -47,6 +47,7 @@
     "hono": "^4.11.9",
     "typescript": "^5.7.0",
     "@radix-ui/react-dialog": "^1.1.19",
-    "vaul": "^1.1.2"
+    "vaul": "^1.1.2",
+    "@get-bb/plugin-sdk": "0.4.87"
   }
 }
