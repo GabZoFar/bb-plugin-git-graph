@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-git-graph",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "A compact, thread-aware Git commit graph for bb.",
   "license": "MIT",
   "repository": {
