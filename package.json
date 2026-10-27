@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-git-graph",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "description": "A compact, thread-aware Git commit graph for bb.",
   "license": "MIT",
   "repository": {
@@ -17,8 +17,8 @@
     "typecheck": "tsc --noEmit"
   },
   "engines": {
-    "bb": ">=0.36",
-    "bbPluginSdk": ">=0.4.87"
+    "bb": ">=0.47.1",
+    "bbPluginSdk": ">=0.6.79"
   },
   "bb": {
     "name": "Git Graph",
@@ -34,20 +34,20 @@
     "@hugeicons/core-free-icons": "^4.1.3",
     "@hugeicons/react": "^1.1.6",
     "@radix-ui/react-slot": "^1.3.0",
-    "class-variance-authority": "^0.7.1",
-    "clsx": "^2.1.1",
-    "tailwind-merge": "^3.4.0",
     "zod": "^4.3.6"
   },
   "devDependencies": {
+    "@get-bb/plugin-sdk": "0.6.80",
+    "@radix-ui/react-dialog": "^1.1.19",
     "@types/better-sqlite3": "^7.6.12",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
     "better-sqlite3": "^12.0.0",
+    "class-variance-authority": "^0.7.1",
+    "clsx": "^2.1.1",
     "hono": "^4.11.9",
+    "tailwind-merge": "^3.4.0",
     "typescript": "^5.7.0",
-    "@radix-ui/react-dialog": "^1.1.19",
-    "vaul": "^1.1.2",
-    "@get-bb/plugin-sdk": "0.4.87"
+    "vaul": "^1.1.2"
   }
 }

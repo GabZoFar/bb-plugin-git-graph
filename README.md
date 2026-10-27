@@ -8,7 +8,7 @@ another connected machine.
 
 ## Install
 
-Requires bb 0.36 or newer and `npm` on `PATH`:
+Requires bb 0.47.1 or newer and `npm` on `PATH`:
 
 ```sh
 bb plugin install https://github.com/GabZoFar/bb-plugin-git-graph

@@ -1,10 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   definePluginApp,
-  useBbNavigate,
+  experimental_useAppPanel,
   useRpc,
   type PluginThreadHeaderActionProps,
-  type PluginThreadPanelProps,
 } from "@get-bb/plugin-sdk/app";
 import type {
   GitGraphCommit,
@@ -274,7 +273,7 @@ function EmptyGraph({ message }: { message: string }) {
   );
 }
 
-function GitGraphPanel({ threadId }: PluginThreadPanelProps) {
+function GitGraphPanel({ threadId }: { threadId: string }) {
   const rpc = useRpc<typeof rpcContract>();
   const [repositories, setRepositories] = useState<GitGraphRepository[]>([]);
   const [selectedRepositoryPath, setSelectedRepositoryPath] = useState<
@@ -606,14 +605,24 @@ function GitGraphPanel({ threadId }: PluginThreadPanelProps) {
 }
 
 function GitGraphHeaderAction({ isCompactViewport }: PluginThreadHeaderActionProps) {
-  const navigate = useBbNavigate();
+  const panel = experimental_useAppPanel();
   return (
     <Button
       aria-label="Open Git graph"
       className={isCompactViewport ? "size-7" : "h-7 gap-1.5 px-2 text-xs"}
       size={isCompactViewport ? "icon" : "sm"}
       variant="ghost"
-      onClick={() => navigate.openThreadPanel({ actionId: "git-graph", title: "Git Graph" })}
+      onClick={() =>
+        panel.experimental_openTab({
+          surface: { kind: "current" },
+          tab: {
+            id: "git-graph",
+            context: { kind: "thread" },
+            availability: "action",
+          },
+          title: "Git Graph",
+        })
+      }
     >
       <Icon name="GitBranch" />
       {isCompactViewport ? null : <span>Graph</span>}
@@ -622,7 +631,9 @@ function GitGraphHeaderAction({ isCompactViewport }: PluginThreadHeaderActionPro
 }
 
 export default definePluginApp((app) => {
-  app.slots.threadPanelAction({
+  app.slots.experimental_tab({
+    context: { kind: "thread" },
+    availability: "action",
     id: "git-graph",
     title: "Git Graph",
     icon: "GitBranch",
