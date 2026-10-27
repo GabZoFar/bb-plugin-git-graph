@@ -530,7 +530,7 @@ function GitGraphPanel({ threadId }: { threadId: string }) {
           </span>
         ) : null}
         <Button
-          aria-label="Refresh Git graph"
+          aria-label="Refresh Git history graph"
           className="size-7"
           disabled={isLoading}
           size="icon"
@@ -608,7 +608,7 @@ function GitGraphHeaderAction({ isCompactViewport }: PluginThreadHeaderActionPro
   const panel = experimental_useAppPanel();
   return (
     <Button
-      aria-label="Open Git graph"
+      aria-label="Open Git history graph"
       className={isCompactViewport ? "size-7" : "h-7 gap-1.5 px-2 text-xs"}
       size={isCompactViewport ? "icon" : "sm"}
       variant="ghost"
@@ -620,7 +620,7 @@ function GitGraphHeaderAction({ isCompactViewport }: PluginThreadHeaderActionPro
             context: { kind: "thread" },
             availability: "action",
           },
-          title: "Git Graph",
+          title: "Git History Graph",
         })
       }
     >
@@ -635,7 +635,7 @@ export default definePluginApp((app) => {
     context: { kind: "thread" },
     availability: "action",
     id: "git-graph",
-    title: "Git Graph",
+    title: "Git History Graph",
     icon: "GitBranch",
     layout: "flush",
     component: GitGraphPanel,
@@ -643,7 +643,7 @@ export default definePluginApp((app) => {
 
   app.slots.experimental_threadHeaderAction({
     id: "git-graph-header",
-    title: "Git Graph",
+    title: "Git History Graph",
     component: GitGraphHeaderAction,
   });
 });

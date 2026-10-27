@@ -21,7 +21,7 @@
     "bbPluginSdk": ">=0.6.79"
   },
   "bb": {
-    "name": "Git Graph",
+    "name": "Git History Graph",
     "description": "A compact, thread-aware Git commit graph for bb.",
     "branding": {
       "icon": "GitBranch"

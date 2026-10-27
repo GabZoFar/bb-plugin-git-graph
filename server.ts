@@ -280,7 +280,7 @@ async function runGitLog(
     bb,
     environmentId,
     command,
-    `Git Graph: ${repositoryPath.split(/[\\/]/).filter(Boolean).at(-1) ?? repositoryPath}`,
+    `Git History Graph: ${repositoryPath.split(/[\\/]/).filter(Boolean).at(-1) ?? repositoryPath}`,
   );
 }
 
@@ -311,7 +311,7 @@ async function readAdditionalDirectories(
     bb,
     environmentId,
     command,
-    "Git Graph repository settings",
+    "Git History Graph repository settings",
   );
   if (result.exitCode !== 0) return [];
 
@@ -356,7 +356,7 @@ async function canonicalizeRepositories(
     bb,
     environmentId,
     command,
-    "Git Graph repository discovery",
+    "Git History Graph repository discovery",
   );
   if (result.exitCode !== 0) return [];
 

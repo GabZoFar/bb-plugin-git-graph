@@ -4,7 +4,7 @@ A compact, read-only Git history graph for [bb](https://getbb.app/). It opens in
 and runs Git in that thread's environment, including environments hosted on
 another connected machine.
 
-![Git Graph plugin open beside a bb thread, showing colored commit lanes and branch labels](./assets/git-graph-preview.png)
+![Git History Graph plugin open beside a bb thread, showing colored commit lanes and branch labels](./assets/git-graph-preview.png)
 
 ## Install
 
